@@ -26,6 +26,42 @@ with both NVLink-connected pairs and GPUs without NVLink.
 BAR1 exposes GPU memory over PCIe so another GPU can read and write it directly.
 Unlike NVIDIA's proprietary PCIe P2P protocol, this works across GPU generations.
 
+### Data path comparison
+
+```mermaid
+flowchart LR
+    subgraph before["Before P2P: staged copy through host"]
+        direction TB
+        G1A["GPU A VRAM"] -->|"DMA write to host"| H1["Host RAM"]
+        H1 -->|"DMA read from host"| G2A["GPU B VRAM"]
+        style G1A fill:#f9d,stroke:#333
+        style G2A fill:#f9d,stroke:#333
+        style H1 fill:#ccf,stroke:#333
+    end
+
+    subgraph after["After P2P: direct GPU-to-GPU"]
+        direction TB
+        G1B["GPU A VRAM"] -->|"PCIe BAR1 read/write"| G2B["GPU B VRAM"]
+        style G1B fill:#f9d,stroke:#333
+        style G2B fill:#f9d,stroke:#333
+    end
+```
+
+With P2P, GPU B reads GPU A's memory directly over the PCIe fabric (or NVLink if
+present). The CPU and host RAM are not involved in the data path, eliminating
+the bottleneck of staging through system memory.
+
+| Metric | Staged copy (no P2P) | PCIe P2P (BAR1) | NVLink P2P |
+|--------|---------------------|-----------------|------------|
+| Path | GPU → Host RAM → GPU | GPU ↔ PCIe ↔ GPU | GPU ↔ NVLink ↔ GPU |
+| Bandwidth | Limited by host memory controller | Limited by PCIe link (e.g. Gen4 x4 ≈ 6 GB/s, x16 ≈ 25 GB/s per direction) | Limited by NVLink version (e.g. NVLink 2.0 ≈ 300 GB/s) |
+| CPU involvement | DMA setup only | DMA setup only | DMA setup only |
+| Cross-generation | Yes | Yes (with this patch) | Limited |
+
+Actual bandwidth depends on the PCIe topology. GPUs behind a chipset PCH (e.g. Intel Z790, AMD X870)
+are limited by the PCH's PCIe link, which is often Gen3 x4 or Gen4 x4. For best P2P bandwidth,
+both GPUs should be on CPU-attached PCIe slots.
+
 When the firmware console is at physical VRAM offset zero, it can share the static
 BAR1 mapping instead of taking up a separate window. Other layouts keep the driver's
 separate console mapping.
@@ -42,6 +78,61 @@ separate console mapping.
    - Run `sudo update-grub`
 3. Install the [NVIDIA 610.57.04 driver](https://www.nvidia.com/en-us/drivers/details/274513/).
 4. Run `./install.sh` in this repo.
+
+   The install script handles several subtleties that a bare `make modules_install`
+   would miss:
+
+   - **Secure Boot module signing**: On systems with Secure Boot enabled and kernel
+     lockdown, modules must be signed with a key enrolled in the firmware. The script
+     signs all modules after installation using your MOK key pair (default:
+     `/var/lib/shim-signed/mok/MOK.{priv,der}`).
+   - **DKMS shadowing**: The NVIDIA `.run` installer's DKMS registration keeps copies
+     in `/lib/modules/$(uname -r)/updates/dkms`, which `depmod` prefers over the
+     `kernel/drivers/video` location. The script removes these competing copies so
+     `modprobe nvidia` loads the patched build, not the stock one.
+   - **Module reload**: The script unloads old modules and loads the new ones, so
+     `nvidia-smi` reports the freshly installed driver rather than a previously
+     loaded one.
+   - **Ownership**: Running `sudo make` leaves root-owned artifacts in the checkout.
+     The script fixes ownership after privileged steps so the next build works.
+
+   Options: `SKIP_SIGN=1` (skip signing), `SKIP_BUILD=1` (reuse existing build),
+   `JOBS=N` (override parallelism).
+
+   To verify P2P is working, run the included bandwidth test:
+
+   ```bash
+   $ ./p2p-check
+   CUDA devices: 2
+     gpu0: NVIDIA GeForce RTX 3090  (bus 01:00.0, 24101 MiB)
+     gpu1: NVIDIA GeForce RTX 3090  (bus 0d:00.0, 24123 MiB)
+     [idle           ] NVML link (current/max):  gpu0 gen1/4 x8/16  gpu1 gen1/4 x4/16
+
+   peer access supported:  gpu0->gpu1 YES   gpu1->gpu0 YES
+   cudaDeviceEnablePeerAccess(0->1): ok
+   cudaDeviceEnablePeerAccess(1->0): ok
+
+   size            peer 0->1    peer 1->0  host-staged
+                    GB/s         GB/s         GB/s
+   64 MiB               2.33         6.58         4.30
+   256 MiB              2.33         6.59         4.30
+     [under load     ] NVML link (current/max):  gpu0 gen4/4 x8/16  gpu1 gen4/4 x4/16
+
+   reading:
+     peer bandwidth clearly ABOVE host-staged = PCIe P2P is working
+     peer bandwidth at or below host-staged    = falling back to a
+     staged copy, i.e. no real P2P
+   ```
+
+   In this example, gpu0 is on a CPU-attached x8 slot (limited by board design
+   when M.2 slots are populated) and gpu1 is on a chipset-attached x4 slot.
+   The peer bandwidth (2.33–6.59 GB/s) exceeds host-staged (4.30 GB/s), confirming
+   PCIe P2P is working. The asymmetry (gpu1→gpu0 faster than gpu0→gpu1) is typical
+   when one GPU is behind a chipset PCH.
+
+   If peer bandwidth is at or below host-staged, check that your IOMMU is in
+   passthrough mode and that ACS is disabled (see "Potential issues" below).
+
 5. For mixed-generation P2P, back up and patch the system `libcuda` as described below.
 6. Reboot the server.
 
