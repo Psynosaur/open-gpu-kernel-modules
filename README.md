@@ -29,22 +29,37 @@ Unlike NVIDIA's proprietary PCIe P2P protocol, this works across GPU generations
 ### Data path comparison
 
 ```mermaid
-flowchart LR
-    subgraph before["Before P2P: staged copy through host"]
+%% P2P Off vs On: Data Flow Comparison
+%% Dual RTX 3090, no NVLink bridge
+
+graph TB
+    subgraph "P2P OFF (stock driver)"
         direction TB
-        G1A["GPU A VRAM"] -->|"DMA write to host"| H1["Host RAM"]
-        H1 -->|"DMA read from host"| G2A["GPU B VRAM"]
-        style G1A fill:#f9d,stroke:#333
-        style G2A fill:#f9d,stroke:#333
-        style H1 fill:#ccf,stroke:#333
+        A1[GPU 0<br/>VRAM 24GB] -->|D2H copy<br/>~3.2 GB/s| CPU1[CPU + System RAM]
+        CPU1 -->|H2D copy<br/>~3.2 GB/s| B1[GPU 1<br/>VRAM 24GB]
+        
+        style A1 fill:#6f,stroke:#333
+        style B1 fill:#6f,stroke:#333
+        style CPU1 fill:#cc,stroke:#333
+        
+        label1["Effective GPU→GPU: ~1.6 GB/s<br/>(two copies, CPU involved)"]
+        style label1 fill:#fe,stroke:#c00
     end
 
-    subgraph after["After P2P: direct GPU-to-GPU"]
+    subgraph "P2P ON (patched driver)"
         direction TB
-        G1B["GPU A VRAM"] -->|"PCIe BAR1 read/write"| G2B["GPU B VRAM"]
-        style G1B fill:#f9d,stroke:#333
-        style G2B fill:#f9d,stroke:#333
+        A2[GPU 0<br/>VRAM 24GB] -->|Direct PCIe DMA<br/>~2.3 GB/s| B2[GPU 1<br/>VRAM 24GB]
+        B2 -->|Direct PCIe DMA<br/>~6.6 GB/s| A2
+        
+        style A2 fill:#6f,stroke:#333
+        style B2 fill:#6f,stroke:#333
+        
+        label2["Direct GPU→GPU: 2.3-6.6 GB/s<br/>(one copy, no CPU/RAM)"]
+        style label2 fill:#ef,stroke:#090
     end
+
+    note["Each GPU keeps its own 24GB VRAM.<br/>No pooled memory. Direct peer access<br/>to the other GPU's VRAM via PCIe."]
+    style note fill:#ee,stroke:#369
 ```
 
 With P2P, GPU B reads GPU A's memory directly over the PCIe fabric (or NVLink if
