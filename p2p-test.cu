@@ -287,9 +287,9 @@ int main(void)
         double time_p10 = (256.0 / p10);
         double time_st = (256.0 / st);
         printf("  time for 256 MiB:\n");
-        printf("    peer 0->1: %.3f s\n", time_p01);
-        printf("    peer 1->0: %.3f s\n", time_p10);
-        printf("    host-staged: %.3f s\n", time_st);
+        printf("    peer 0->1: %.0f us\n", time_p01 * 1000);
+        printf("    peer 1->0: %.0f us\n", time_p10 * 1000);
+        printf("    host-staged: %.0f us\n", time_st * 1000);
         if (p01 > st || p10 > st)
             printf("  -> PCIe P2P is working (at least one peer direction > staged)\n");
         else
